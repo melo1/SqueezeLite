@@ -2,6 +2,7 @@
  *  Squeezelite - lightweight headless squeezebox emulator
  *
  *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
+ *      Ralph Irving 2015-2016, ralph_irving@hotmail.com
  *  
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -24,6 +25,9 @@
 
 #include <fcntl.h>
 
+#if SUN
+#include <signal.h>
+#endif
 static log_level loglevel;
 
 static struct buffer buf;
@@ -296,6 +300,9 @@ void stream_init(log_level level, unsigned stream_buf_size) {
 		exit(0);
 	}
 	
+#if SUN
+	signal(SIGPIPE, SIG_IGN);	/* Force sockets to return -1 with EPIPE on pipe signal */
+#endif
 	stream.state = STOPPED;
 	stream.header = malloc(MAX_HEADER);
 	*stream.header = '\0';
@@ -309,7 +316,9 @@ void stream_init(log_level level, unsigned stream_buf_size) {
 #if LINUX || OSX || FREEBSD
 	pthread_attr_t attr;
 	pthread_attr_init(&attr);
+#ifdef PTHREAD_STACK_MIN	
 	pthread_attr_setstacksize(&attr, PTHREAD_STACK_MIN + STREAM_THREAD_STACK_SIZE);
+#endif
 	pthread_create(&thread, &attr, stream_thread, NULL);
 	pthread_attr_destroy(&attr);
 #endif

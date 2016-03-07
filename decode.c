@@ -2,6 +2,7 @@
  *  Squeezelite - lightweight headless squeezebox emulator
  *
  *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
+ *      Ralph Irving 2015-2016, ralph_irving@hotmail.com
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -154,7 +155,9 @@ void decode_init(log_level level, const char *include_codecs, const char *exclud
 #if LINUX || OSX || FREEBSD
 	pthread_attr_t attr;
 	pthread_attr_init(&attr);
+#ifdef PTHREAD_STACK_MIN
 	pthread_attr_setstacksize(&attr, PTHREAD_STACK_MIN + DECODE_THREAD_STACK_SIZE);
+#endif
 	pthread_create(&thread, &attr, decode_thread, NULL);
 	pthread_attr_destroy(&attr);
 #endif

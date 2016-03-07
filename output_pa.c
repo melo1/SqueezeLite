@@ -2,6 +2,7 @@
  *  Squeezelite - lightweight headless squeezebox emulator
  *
  *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
+ *      Ralph Irving 2015-2016, ralph_irving@hotmail.com
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -25,9 +26,33 @@
 #if PORTAUDIO
 
 #include <portaudio.h>
-#if OSX
+#if WIN
+#define snprintf _snprintf
+#endif
+#if OSX && !defined(OSXPPC)
 #include <pa_mac_core.h>
 #endif
+
+#if PA18API
+typedef int PaDeviceIndex;
+typedef double PaTime;
+
+typedef struct PaStreamParameters
+{
+    PaDeviceIndex device;
+    int channelCount;
+    PaSampleFormat sampleFormat;
+    PaTime suggestedLatency;
+
+} PaStreamParameters;
+
+static int paContinue=0; /* Signal that the stream should continue invoking the callback and processing audio. */
+static int paComplete=1; /* Signal that the stream should stop invoking the callback and finish once all output */
+			 /* samples have played. */
+
+static unsigned paFramesPerBuffer = 4096;
+static unsigned paNumberOfBuffers = 4;
+#endif /* PA18API */
 
 // ouput device
 static struct {
@@ -60,10 +85,15 @@ void list_devices(void) {
 	}
 	
 	printf("Output devices:\n");
+#ifndef PA18API
 	for (i = 0; i < Pa_GetDeviceCount(); ++i) {
 		if (Pa_GetDeviceInfo(i)->maxOutputChannels) {
 			printf("  %i - %s [%s]\n", i, Pa_GetDeviceInfo(i)->name, Pa_GetHostApiInfo(Pa_GetDeviceInfo(i)->hostApi)->name);
 		}
+#else
+	for (i = 0; i < Pa_CountDevices(); ++i) {
+		printf("  %i - %s\n", i, Pa_GetDeviceInfo(i)->name);
+#endif
 	}
 	printf("\n");
 	
@@ -85,17 +115,26 @@ static int pa_device_id(const char *device) {
 	int i;
 
 	if (!strncmp(device, "default", 7)) {
+#ifndef PA18API
 		return Pa_GetDefaultOutputDevice();
+#else
+		return Pa_GetDefaultOutputDeviceID();
+#endif
 	}
 	if (len >= 1 && len <= 2 && device[0] >= '0' && device[0] <= '9') {
 		return atoi(device);
 	}
 
+#ifndef PA18API
 #define DEVICE_ID_MAXLEN 256
 	for (i = 0; i < Pa_GetDeviceCount(); ++i) {
 		char tmp[DEVICE_ID_MAXLEN];
 		snprintf(tmp, DEVICE_ID_MAXLEN, "%s [%s]", Pa_GetDeviceInfo(i)->name, Pa_GetHostApiInfo(Pa_GetDeviceInfo(i)->hostApi)->name);
 		if (!strncmp(tmp, device, len)) {
+#else
+	for (i = 0; i < Pa_CountDevices(); ++i) {
+		if (!strncmp(Pa_GetDeviceInfo(i)->name, device, len)) {
+#endif
 			return i;
 		}
 	}
@@ -103,9 +142,14 @@ static int pa_device_id(const char *device) {
 	return -1;
 }
 
+#ifndef PA18API
 static int pa_callback(const void *pa_input, void *pa_output, unsigned long pa_frames_wanted, 
 					   const PaStreamCallbackTimeInfo *timeInfo, PaStreamCallbackFlags statusFlags, void *userData);
 
+#else
+static int pa_callback(void *pa_input, void *pa_output, unsigned long pa_frames_wanted, 
+			   PaTimestamp outTime, void *userData);
+#endif
 bool test_open(const char *device, unsigned rates[]) {
 	PaStreamParameters outputParameters;
 	PaError err;
@@ -120,15 +164,23 @@ bool test_open(const char *device, unsigned rates[]) {
 	outputParameters.device = device_id;
 	outputParameters.channelCount = 2;
 	outputParameters.sampleFormat = paInt32;
+#ifndef PA18API
 	outputParameters.suggestedLatency =
 		output.latency ? (double)output.latency/(double)1000 : Pa_GetDeviceInfo(outputParameters.device)->defaultHighOutputLatency;
 	outputParameters.hostApiSpecificStreamInfo = NULL;
+#endif
 
 	// check supported sample rates
 	// Note use Pa_OpenStream as it appears more reliable than Pa_IsFormatSupported on some windows apis
 	for (i = 0, ind = 0; ref[i]; ++i) {
+#ifndef PA18API
 		err = Pa_OpenStream(&pa.stream, NULL, &outputParameters, (double)ref[i], paFramesPerBufferUnspecified, paNoFlag, 
 							pa_callback, NULL);
+#else
+		err = Pa_OpenStream(&pa.stream, paNoDevice, 0, 0, NULL, outputParameters.device,
+			outputParameters.channelCount, outputParameters.sampleFormat, NULL, (double)ref[i],
+			paFramesPerBuffer, paNumberOfBuffers, paNoFlag, pa_callback, NULL);
+#endif
 		if (err == paNoError) {
 			Pa_CloseStream(pa.stream);
 			rates[ind++] = ref[i];
@@ -234,11 +286,13 @@ void _pa_open(void) {
 		outputParameters.device = device_id;
 		outputParameters.channelCount = 2;
 		outputParameters.sampleFormat = paInt32;
+#ifndef PA18API
 		outputParameters.suggestedLatency =
 			output.latency ? (double)output.latency/(double)1000 : Pa_GetDeviceInfo(outputParameters.device)->defaultHighOutputLatency;
 		outputParameters.hostApiSpecificStreamInfo = NULL;
 		
-#if OSX
+#endif
+#if OSX && !defined(OSXPPC)
 		// enable pro mode which aims to avoid resampling if possible
 		// see http://code.google.com/p/squeezelite/issues/detail?id=11 & http://code.google.com/p/squeezelite/issues/detail?id=37
 		// command line controls osx_playnice which is -1 if not specified, 0 or 1 - choose playnice if -1 or 1
@@ -257,29 +311,45 @@ void _pa_open(void) {
 	}
 
 	if (!err &&
+#ifndef PA18API
 		(err = Pa_OpenStream(&pa.stream, NULL, &outputParameters, (double)output.current_sample_rate, paFramesPerBufferUnspecified,
 							 paPrimeOutputBuffersUsingStreamCallback | paDitherOff, pa_callback, NULL)) != paNoError) {
+#else
+		(err = Pa_OpenStream(&pa.stream, paNoDevice, 0, 0, NULL, outputParameters.device, outputParameters.channelCount,
+							outputParameters.sampleFormat, NULL, (double)output.current_sample_rate, paFramesPerBuffer,
+							paNumberOfBuffers, paDitherOff, pa_callback, NULL)) != paNoError) {
+
+#endif
 		LOG_WARN("error opening device %i - %s : %s", outputParameters.device, Pa_GetDeviceInfo(outputParameters.device)->name, 
 				 Pa_GetErrorText(err));
 	}
 
 	if (!err) {
+#ifndef PA18API
 		LOG_INFO("opened device %i - %s at %u latency %u ms", outputParameters.device, Pa_GetDeviceInfo(outputParameters.device)->name,
 				 (unsigned int)Pa_GetStreamInfo(pa.stream)->sampleRate, (unsigned int)(Pa_GetStreamInfo(pa.stream)->outputLatency * 1000));
+#else
+		LOG_INFO("opened device %i - %s at %u fpb %u nbf %u", outputParameters.device, Pa_GetDeviceInfo(outputParameters.device)->name,
+				 (unsigned int)output.current_sample_rate, paFramesPerBuffer, paNumberOfBuffers);
 
+#endif
 		pa.rate = output.current_sample_rate;
 
+#ifndef PA18API
 		if ((err = Pa_SetStreamFinishedCallback(pa.stream, pa_stream_finished)) != paNoError) {
 			LOG_WARN("error setting finish callback: %s", Pa_GetErrorText(err));
 		}
 	
 		UNLOCK; // StartStream can call pa_callback in a sychronised thread on freebsd, remove lock while it is called
 
+#endif
 		if ((err = Pa_StartStream(pa.stream)) != paNoError) {
 			LOG_WARN("error starting stream: %s", Pa_GetErrorText(err));
 		}
 
+#ifndef PA18API
 		LOCK;
+#endif
 	}
 
 	if (err && !monitor_thread_running) {
@@ -339,16 +409,21 @@ static int _write_frames(frames_t out_frames, bool silence, s32_t gainL, s32_t g
 	return (int)out_frames;
 }
 
+#ifndef PA18API
 static int pa_callback(const void *pa_input, void *pa_output, unsigned long pa_frames_wanted, 
 					   const PaStreamCallbackTimeInfo *time_info, PaStreamCallbackFlags statusFlags, void *userData) {
-	int ret;
 	double stream_time;
+#else
+static int pa_callback(void *pa_input, void *pa_output, unsigned long pa_frames_wanted,PaTimestamp outTime, void *userData) {
+#endif
+	int ret;
 	frames_t frames;
 
 	optr = (u8_t *)pa_output;
 
 	LOCK;
 
+#ifndef PA18API
 	stream_time = Pa_GetStreamTime(pa.stream);
 
 	if (time_info->outputBufferDacTime > stream_time) {
@@ -358,6 +433,9 @@ static int pa_callback(const void *pa_input, void *pa_output, unsigned long pa_f
 		output.device_frames = 0;
 	}
 
+#else
+	output.device_frames = 0;
+#endif
 	output.updated = gettime_ms();
 	output.frames_played_dmp = output.frames_played;
 
@@ -382,20 +460,36 @@ static int pa_callback(const void *pa_input, void *pa_output, unsigned long pa_f
 
 	UNLOCK;
 
+#ifdef PA18API
+	if ( ret == paComplete )
+		pa_stream_finished (userData);
+#endif
 	return ret;
 }
 
 void output_init_pa(log_level level, const char *device, unsigned output_buf_size, char *params, unsigned rates[], unsigned rate_delay,
 					unsigned idle) {
 	PaError err;
+#ifndef PA18API
 	unsigned latency = 0;
 	int osx_playnice = -1;
 
+#else
+	unsigned pa_frames = 0;
+	unsigned pa_nbufs = 0;
+#endif /* PA18API */
+#ifndef PA18API
 	char *l = next_param(params, ':');
 	char *p = next_param(NULL, ':');
 
 	if (l) latency = (unsigned)atoi(l);
 	if (p) osx_playnice = atoi(p);
+#else
+	char *t = next_param(params, ':');
+	char *c = next_param(NULL, ':');
+	if (t) pa_frames  = atoi(t);
+	if (c) pa_nbufs = atoi(c);
+#endif
 
 	loglevel = level;
 
@@ -403,15 +497,24 @@ void output_init_pa(log_level level, const char *device, unsigned output_buf_siz
 
 	memset(&output, 0, sizeof(output));
 
+#ifndef PA18API
 	output.latency = latency;
 	output.osx_playnice = osx_playnice;
+#else
+	if ( pa_frames != 0 )
+		paFramesPerBuffer = pa_frames;
+	if ( pa_nbufs != 0 )
+		paNumberOfBuffers = pa_nbufs;
+#endif /* PA18API */
 	output.format = 0;
 	output.start_frames = 0;
 	output.write_cb = &_write_frames;
 	output.rate_delay = rate_delay;
 	pa.stream = NULL;
 
+#ifndef PA18API
 	LOG_INFO("requested latency: %u", output.latency);
+#endif
 
 	if ((err = Pa_Initialize()) != paNoError) {
 		LOG_WARN("error initialising port audio: %s", Pa_GetErrorText(err));

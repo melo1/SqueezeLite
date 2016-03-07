@@ -2,6 +2,7 @@
  *  Squeezelite - lightweight headless squeezebox emulator
  *
  *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
+ *      Ralph Irving 2015-2016, ralph_irving@hotmail.com
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -29,6 +30,16 @@
 #include <net/if_dl.h>
 #include <net/if_types.h>
 #endif
+#endif
+#if SUN
+#include <sys/socket.h>
+#include <sys/sockio.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <net/if.h>
+#include <net/if_arp.h>
+#include <net/if_dl.h>
+#include <net/if_types.h>
 #endif
 #if WIN
 #include <iphlpapi.h>
@@ -89,7 +100,11 @@ u32_t gettime_ms(void) {
 #else
 #if LINUX || FREEBSD
 	struct timespec ts;
+#ifdef CLOCK_MONOTONIC
 	if (!clock_gettime(CLOCK_MONOTONIC, &ts)) {
+#else
+	if (!clock_gettime(CLOCK_REALTIME, &ts)) {
+#endif
 		return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 	}
 #endif
@@ -100,13 +115,28 @@ u32_t gettime_ms(void) {
 }
 
 // mac address
-#if LINUX
+#if LINUX && !defined(SUN)
 // search first 4 interfaces returned by IFCONF
 void get_mac(u8_t mac[]) {
+	char *utmac;
 	struct ifconf ifc;
 	struct ifreq *ifr, *ifend;
 	struct ifreq ifreq;
 	struct ifreq ifs[4];
+
+	utmac = getenv("UTMAC");
+	if (utmac)
+	{
+		if ( strlen(utmac) == 17 )
+		{
+			if (sscanf(utmac,"%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx",
+				&mac[0],&mac[1],&mac[2],&mac[3],&mac[4],&mac[5]) == 6)
+			{
+				return;
+			}
+		}
+
+	}
 
 	mac[0] = mac[1] = mac[2] = mac[3] = mac[4] = mac[5] = 0;
 
@@ -133,6 +163,72 @@ void get_mac(u8_t mac[]) {
 	}
 
 	close(s);
+}
+#endif
+
+#if SUN
+void get_mac(u8_t mac[]) {
+	struct  arpreq          parpreq;
+	struct  sockaddr_in     *psa;
+	struct  in_addr         inaddr;
+	struct  hostent         *phost;
+	char                    hostname[MAXHOSTNAMELEN];
+	char                    **paddrs;
+	char                    *utmac;
+	int                     sock;
+	int                     status=0;
+
+	utmac = getenv("UTMAC");
+	if (utmac)
+	{
+		if ( strlen(utmac) == 17 )
+		{
+			if (sscanf(utmac,"%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx",
+				&mac[0],&mac[1],&mac[2],&mac[3],&mac[4],&mac[5]) == 6)
+			{
+				return;
+			}
+		}
+
+	}
+
+	mac[0] = mac[1] = mac[2] = mac[3] = mac[4] = mac[5] = 0;
+
+	gethostname(hostname,  MAXHOSTNAMELEN);
+
+	phost = gethostbyname(hostname);
+
+	paddrs = phost->h_addr_list;
+	memcpy(&inaddr.s_addr, *paddrs, sizeof(inaddr.s_addr));
+
+	sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+
+	if(sock == -1)
+	{
+		mac[5] = 1;
+		return;
+	}
+
+	memset(&parpreq, 0, sizeof(struct arpreq));
+	psa = (struct sockaddr_in *) &parpreq.arp_pa;
+	memset(psa, 0, sizeof(struct sockaddr_in));
+	psa->sin_family = AF_INET;
+	memcpy(&psa->sin_addr, *paddrs, sizeof(struct in_addr));
+
+	status = ioctl(sock, SIOCGARP, &parpreq);
+
+	if(status == -1)
+	{
+		mac[5] = 2;
+		return;
+	}
+
+	mac[0] = (unsigned char) parpreq.arp_ha.sa_data[0];
+	mac[1] = (unsigned char) parpreq.arp_ha.sa_data[1];
+	mac[2] = (unsigned char) parpreq.arp_ha.sa_data[2];
+	mac[3] = (unsigned char) parpreq.arp_ha.sa_data[3];
+	mac[4] = (unsigned char) parpreq.arp_ha.sa_data[4];
+	mac[5] = (unsigned char) parpreq.arp_ha.sa_data[5];
 }
 #endif
 

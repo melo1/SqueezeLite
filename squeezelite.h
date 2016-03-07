@@ -2,6 +2,7 @@
  *  Squeezelite - lightweight headless squeezebox emulator
  *
  *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
+ *      Ralph Irving 2015-2016, ralph_irving@hotmail.com
  *  
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,11 +17,14 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
+ * Additions (c) Paul Hermann, 2015-2016 under the same license terms
+ *   -Control of Raspberry pi GPIO for amplifier power
+ *   -Launch script on power status change from LMS
  */
 
-// make may define: PORTAUDIO, SELFPIPE, RESAMPLE, RESAMPLE_MP, VISEXPORT, IR, DSD, LINKALL to influence build
+// make may define: PORTAUDIO, SELFPIPE, RESAMPLE, RESAMPLE_MP, VISEXPORT, GPIO, IR, DSD, LINKALL to influence build
 
-#define VERSION "v1.8"
+#define VERSION "v1.8.3-melo"
 
 #if !defined(MODEL_NAME)
 #define MODEL_NAME SqueezeLite
@@ -51,6 +55,13 @@
 #define OSX       0
 #define WIN       0
 #define FREEBSD   1
+#elif defined (__sun)
+#define SUN       1
+#define LINUX     1
+#define PORTAUDIO 1
+#define PA18API   1
+#define OSX       0
+#define WIN       0
 #else
 #error unknown target
 #endif
@@ -63,7 +74,11 @@
 #define PORTAUDIO 1
 #endif
 
-#if LINUX && !defined(SELFPIPE)
+#if SUN
+#define EVENTFD   0
+#define WINEVENT  0
+#define SELFPIPE  1
+#elif LINUX && !defined(SELFPIPE)
 #define EVENTFD   1
 #define SELFPIPE  0
 #define WINEVENT  0
@@ -206,6 +221,10 @@
 
 #define SL_LITTLE_ENDIAN (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
 
+#if SUN || OSXPPC
+#undef SL_LITTLE_ENDIAN
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -225,6 +244,9 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <signal.h>
+#if SUN
+#include <sys/types.h>
+#endif /* SUN */
 
 #define STREAM_THREAD_STACK_SIZE  64 * 1024
 #define DECODE_THREAD_STACK_SIZE 128 * 1024
@@ -235,10 +257,17 @@
 #define last_error() errno
 #define ERROR_WOULDBLOCK EWOULDBLOCK
 
+#ifdef SUN
+typedef uint8_t  u8_t;
+typedef uint16_t u16_t;
+typedef uint32_t u32_t;
+typedef uint64_t u64_t;
+#else
 typedef u_int8_t  u8_t;
 typedef u_int16_t u16_t;
 typedef u_int32_t u32_t;
 typedef u_int64_t u64_t;
+#endif /* SUN */
 typedef int16_t   s16_t;
 typedef int32_t   s32_t;
 typedef int64_t   s64_t;
@@ -342,7 +371,7 @@ struct wake {
 #if (LINUX && __WORDSIZE == 64) || (FREEBSD && __LP64__)
 #define FMT_u64 "%lu"
 #define FMT_x64 "%lx"
-#elif __GLIBC_HAVE_LONG_LONG || defined __GNUC__ || WIN
+#elif __GLIBC_HAVE_LONG_LONG || defined __GNUC__ || WIN || SUN
 #define FMT_u64 "%llu"
 #define FMT_x64 "%llx"
 #else
@@ -388,6 +417,10 @@ u16_t unpackn(u16_t *src);
 void set_nosigpipe(sockfd s);
 #else
 #define set_nosigpipe(s)
+#endif
+#if SUN
+void init_daemonize(void);
+int daemon(int,int);
 #endif
 #if WIN
 void winsock_init(void);
@@ -650,6 +683,17 @@ struct codec *register_vorbis(void);
 struct codec *register_faad(void);
 struct codec *register_dsd(void);
 struct codec *register_ff(const char *codec);
+
+//gpio.c
+#if GPIO
+void relay( int state);
+void relay_script(int state);
+int gpio_pin;
+bool gpio_active;
+char *power_script;
+//  my amp state
+int ampstate;
+#endif
 
 // ir.c
 #if IR

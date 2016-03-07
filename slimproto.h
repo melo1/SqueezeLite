@@ -2,6 +2,7 @@
  *  Squeezelite - lightweight headless squeezebox emulator
  *
  *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
+ *      Ralph Irving 2015-2016, ralph_irving@hotmail.com
  *  
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,7 +21,11 @@
 
 // packet formats for slimproto
 
+#ifndef SUN
 #pragma pack(push, 1)
+#else
+#pragma pack(1)
+#endif
 
 // from S:N:Slimproto _hello_handler
 struct HELO_packet {
@@ -173,4 +178,8 @@ struct codc_packet {
 	u8_t  pcm_endianness;
 };
 
+#ifndef SUN
 #pragma pack(pop)
+#else
+#pragma pack()
+#endif

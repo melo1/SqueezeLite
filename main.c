@@ -2,6 +2,8 @@
  *  Squeezelite - lightweight headless squeezebox emulator
  *
  *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
+ *      Ralph Irving 2015-2016, ralph_irving@hotmail.com
+ *      Manuel de Melo 2016, manuel@melo-online.de
  *  
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,13 +18,16 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
+ * Additions (c) Paul Hermann, 2015-2016 under the same license terms
+ *   -Control of Raspberry pi GPIO for amplifier power
+ *   -Launch script on power status change from LMS
  */
 
 #include "squeezelite.h"
 
 #include <signal.h>
 
-#define TITLE "Squeezelite " VERSION ", Copyright 2012-2015 Adrian Smith."
+#define TITLE "Squeezelite " VERSION ", Copyright 2012-2015 Adrian Smith, 2015-2016 Ralph Irving, 2016 Manuel de Melo."
 
 #define CODECS_BASE "flac,pcm,mp3,ogg,aac"
 #if FFMPEG
@@ -49,7 +54,9 @@ static void usage(const char *argv0) {
 		   "  -a <b>:<p>:<f>:<m>\tSpecify ALSA params to open output device, b = buffer time in ms or size in bytes, p = period count or size in bytes, f sample format (16|24|24_3|32), m = use mmap (0|1)\n"
 #endif
 #if PORTAUDIO
-#if OSX
+#if PA18API
+		   "  -a <frames>:<buffers>\tSpecify output target 4 byte frames per buffer, number of buffers\n"
+#elif OSX && !defined(OSXPPC)
 		   "  -a <l>:<r>\t\tSpecify Portaudio params to open output device, l = target latency in ms, r = allow OSX to resample (0|1)\n"
 #else
 		   "  -a <l>\t\tSpecify Portaudio params to open output device, l = target latency in ms\n"
@@ -64,6 +71,9 @@ static void usage(const char *argv0) {
 #else
 		   "  -d <log>=<level>\tSet logging level, logs: all|slimproto|stream|decode|output|ir, level: info|debug|sdebug\n"
 #endif
+#if GPIO
+		   "  -G <Rpi GPIO#>\tSpecify the GPIO# to use for Amp Power Relay\n"
+#endif
 		   "  -e <codec1>,<codec2>\tExplicitly exclude native support of one or more codecs; known codecs: " CODECS "\n"
 		   "  -f <logfile>\t\tWrite debug to logfile\n"
 #if IR
@@ -73,13 +83,17 @@ static void usage(const char *argv0) {
 		   "  -M <modelname>\tSet the squeezelite player model name sent to the server (default: " MODEL_NAME_STRING ")\n"
 		   "  -n <name>\t\tSet the player name\n"
 		   "  -N <filename>\t\tStore player name in filename to allow server defined name changes to be shared between servers (not supported with -n)\n"
+		   "  -W\t\t\tRead format from wave and aiff file headers, ignore server parameters\n"
 #if ALSA
 		   "  -p <priority>\t\tSet real time priority of output thread (1-99)\n"
 #endif
-#if LINUX || FREEBSD
+#if LINUX || FREEBSD || SUN
 		   "  -P <filename>\t\tStore the process id (PID) in filename\n"
 #endif
 		   "  -r <rates>[:<delay>]\tSample rates supported, allows output to be off when squeezelite is started; rates = <maxrate>|<minrate>-<maxrate>|<rate1>,<rate2>,<rate3>; delay = optional delay switching rates in ms\n"
+#if GPIO
+			"  -S <Power Script>\tAbsolute path to script to launch on power commands from LMS\n"
+#endif
 #if RESAMPLE
 		   "  -R -u [params]\tResample, params = <recipe>:<flags>:<attenuation>:<precision>:<passband_end>:<stopband_start>:<phase_response>,\n" 
 		   "  \t\t\t recipe = (v|h|m|l|q)(L|I|M)(s) [E|X], E = exception - resample only if native rate not supported, X = async - resample to max rate for device, otherwise to max sync rate\n"
@@ -101,14 +115,16 @@ static void usage(const char *argv0) {
 		   "  -U <control>\t\tUnmute ALSA control and set to full volume (not supported with -V)\n"
 		   "  -V <control>\t\tUse ALSA control for volume adjustment, otherwise use software volume adjustment\n"
 #endif
-#if LINUX || FREEBSD
+#if LINUX || FREEBSD || SUN
 		   "  -z \t\t\tDaemonize\n"
 #endif
 		   "  -t \t\t\tLicense terms\n"
 		   "  -? \t\t\tDisplay this help text\n"
 		   "\n"
 		   "Build options:"
-#if LINUX
+#if SUN
+		   " SOLARIS"
+#elif LINUX
 		   " LINUX"
 #endif
 #if WIN
@@ -117,6 +133,9 @@ static void usage(const char *argv0) {
 #if OSX
 		   " OSX"
 #endif
+#if OSXPPC
+		   "PPC"
+#endif
 #if FREEBSD
 		   " FREEBSD"
 #endif
@@ -124,7 +143,11 @@ static void usage(const char *argv0) {
 		   " ALSA"
 #endif
 #if PORTAUDIO
+#if PA18API
+		   " PORTAUDIO18"
+#else
 		   " PORTAUDIO"
+#endif
 #endif
 #if EVENTFD
 		   " EVENTFD"
@@ -150,6 +173,9 @@ static void usage(const char *argv0) {
 #endif
 #if IR
 		   " IR"
+#endif
+#if GPIO
+		   " GPIO"
 #endif
 #if DSD
 		   " DSD"
@@ -177,6 +203,12 @@ static void license(void) {
 		   "Contains dsd2pcm library Copyright 2009, 2011 Sebastian Gesemann which\n"
 		   "is subject to its own license.\n\n"
 #endif
+#if GPIO
+		   "Additions (c) Paul Hermann, 2015, 2016 under the same license terms\n"
+		   "  -Control of Raspberry pi GPIO for amplifier power\n"
+			"  -Launch a script on power status change\n\n"
+		   "Contains gpio.c Copyright 2012 Kevin Sangeelee Released under GPLv2\n\n"
+#endif
 		   );
 }
 
@@ -195,6 +227,7 @@ int main(int argc, char **argv) {
 	char *name = NULL;
 	char *namefile = NULL;
 	char *modelname = NULL;
+	extern bool pcm_check_header;
 	char *logfile = NULL;
 	u8_t mac[6];
 	unsigned stream_buf_size = STREAMBUF_SIZE;
@@ -204,7 +237,7 @@ int main(int argc, char **argv) {
 	char *resample = NULL;
 	char *output_params = NULL;
 	unsigned idle = 0;
-#if LINUX || FREEBSD
+#if LINUX || FREEBSD || SUN
 	bool daemonize = false;
 	char *pidfile = NULL;
 	FILE *pidfp = NULL;
@@ -256,7 +289,7 @@ int main(int argc, char **argv) {
 				   , opt) && optind < argc - 1) {
 			optarg = argv[optind + 1];
 			optind += 2;
-		} else if (strstr("ltz?"
+		} else if (strstr("ltz?W"
 #if ALSA
 						  "L"
 #endif
@@ -271,6 +304,9 @@ int main(int argc, char **argv) {
 #endif
 #if IR
 						  "i"
+#endif
+#if GPIO
+						  "GS"
 #endif
 
 						  , opt)) {
@@ -406,6 +442,9 @@ int main(int argc, char **argv) {
 		case 'N':
 			namefile = optarg;
 			break;
+		case 'W':
+			pcm_check_header = true;
+			break;
 #if ALSA
 		case 'p':
 			rt_priority = atoi(optarg);
@@ -416,7 +455,7 @@ int main(int argc, char **argv) {
 			}
 			break;
 #endif
-#if LINUX || FREEBSD
+#if LINUX || FREEBSD || SUN
 		case 'P':
 			pidfile = optarg;
 			break;
@@ -474,9 +513,49 @@ int main(int argc, char **argv) {
 			}
 			break;
 #endif
-#if LINUX || FREEBSD
+#if GPIO
+		case 'G':
+			if (power_script != NULL){
+				fprintf(stderr, "-G and -S options cannot be used together \n\n" );
+				usage(argv[0]);
+				exit(1);
+			}
+			if (optind < argc && argv[optind] && argv[optind][0] != '-') {
+				gpio_pin = atoi(argv[optind++]);
+				gpio_active = true; 
+			} else {
+				fprintf(stderr, "Error in GPIO Pin assignment.\n");
+				usage(argv[0]);
+				exit(1);
+			}
+			break;
+		case 'S':
+			if (gpio_active){
+				fprintf(stderr, "-G and -S options cannot be used together \n\n" );
+				usage(argv[0]);
+				exit(1);
+			}
+			if (optind < argc && argv[optind] && argv[optind][0] != '-') {
+				power_script = argv[optind++];
+				if( access( power_script, R_OK|X_OK ) == -1 ) {
+				    // file doesn't exist
+					fprintf(stderr, "Script %s, not found\n\n", argv[optind-1]);
+					usage(argv[0]);
+					exit(1);
+				}
+			} else {
+				fprintf(stderr, "No Script Name Given.\n\n");
+				usage(argv[0]);
+				exit(1);
+			}
+			break;
+#endif
+#if LINUX || FREEBSD || SUN
 		case 'z':
 			daemonize = true;
+#if SUN
+			init_daemonize();
+#endif /* SUN */
 			break;
 #endif
 		case 't':
@@ -531,7 +610,7 @@ int main(int argc, char **argv) {
 		}
 	}
 
-#if LINUX || FREEBSD
+#if LINUX || FREEBSD || SUN
 	if (pidfile) {
 		if (!(pidfp = fopen(pidfile, "w")) ) {
 			fprintf(stderr, "Error opening pidfile %s: %s\n", pidfile, strerror(errno));
@@ -547,7 +626,7 @@ int main(int argc, char **argv) {
 	}
 
 	if (pidfp) {
-		fprintf(pidfp, "%d\n", getpid());
+		fprintf(pidfp, "%d\n", (int) getpid());
 		fclose(pidfp);
 	}
 #endif
@@ -623,7 +702,7 @@ int main(int argc, char **argv) {
 	winsock_close();
 #endif
 
-#if LINUX || FREEBSD
+#if LINUX || FREEBSD || SUN
 	if (pidfile) {
 		unlink(pidfile);
 		free(pidfile);
